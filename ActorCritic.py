@@ -203,17 +203,17 @@ action_one_hot = slim.one_hot_encoding(action_holder, a_size)
 eps = 1e-6
 # Calculate losses
 # Entropy
-entropy = -tf.reduce_sum(output_p * output_p_logits, axis = 1)
+entropy = -tf.reduce_sum(output_p * output_p_logits)
 
 # Policy Graident loss
-p_i = tf.reduce_sum(tf.multiply(output_p, action_one_hot))
+p_i = tf.reduce_sum(tf.multiply(output_p, action_one_hot), axis = 1)
 actor_loss = -tf.reduce_sum(tf.log(p_i + eps) * advantage_holder)
 
  # Value/Q function loss, and explained variance
-critic_loss = tf.reduce_sum(tf.squared_difference(output_v, target_v_holder), 1)
+critic_loss = 0.5 * tf.reduce_sum(tf.squared_difference(output_v, target_v_holder), 1)
 
 
-loss = 0.5 * actor_loss + 0.5 * critic_loss - 0.001 * entropy
+loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy
 
 '''
 #loss = tf.nn.softmax_cross_entropy_with_logits(logits=output, labels=action_one_hot)
@@ -225,8 +225,8 @@ optimizer2 = tf.train.AdamOptimizer(learning_rate=1e-4)
 update_critic = optimizer2.minimize(value_loss)
 '''
 
-optimizer3 = tf.train.AdamOptimizer(learning_rate=2e-4)
-update = optimizer3.minimize(loss)
+optimizer = tf.train.AdamOptimizer(learning_rate=2e-4)
+update = optimizer.minimize(loss)
 
 sess = tf.Session()
 sess.run(tf.global_variables_initializer())
@@ -299,7 +299,7 @@ while i < total_episodes:
                     advantage_holder: advantage,
                     action_holder: ep_history_np[:, 1]
                     })
-    
+            #print(p_i_output)
             ep_history.clear()
             
      
