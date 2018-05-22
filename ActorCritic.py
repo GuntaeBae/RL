@@ -188,32 +188,34 @@ tf.reset_default_graph()
 
 # inference network
 state_holder = tf.placeholder(shape=[None]+list(s_size), dtype=tf.float32)
-hidden = nature_cnn(state_holder)
-output_p = slim.fully_connected(hidden, a_size, activation_fn=tf.nn.softmax)
-output_p_logits = tf.log(output_p)
-output_v = slim.fully_connected(hidden, 1, activation_fn=None)
+with tf.variable_scope("model"):
+    hidden = nature_cnn(state_holder)
+    logits = slim.fully_connected(hidden, a_size, activation_fn=None)
+    output_p = tf.nn.softmax(logits)
+    output_v = slim.fully_connected(hidden, 1, activation_fn=None)
 
-target_v_holder = tf.placeholder(shape=[None], dtype=tf.float32)
-advantage_holder = tf.placeholder(shape=[None], dtype=tf.float32)
-action_holder = tf.placeholder(shape=[None], dtype=tf.int32)
-action_one_hot = slim.one_hot_encoding(action_holder, a_size)
-
-
+target_v_holder = tf.placeholder(shape=[None,], dtype=tf.float32)
+advantage_holder = tf.placeholder(shape=[None,], dtype=tf.float32)
+action_holder = tf.placeholder(shape=[None,], dtype=tf.int32)
+#action_one_hot = slim.one_hot_encoding(action_holder, a_size)
 
 eps = 1e-6
 # Calculate losses
 # Entropy
-entropy = -tf.reduce_sum(output_p * output_p_logits)
+entory_loss = tf.reduce_mean(-tf.reduce_sum(output_p * tf.log(output_p + eps), axis=1))
 
 # Policy Graident loss
-p_i = tf.reduce_sum(tf.multiply(output_p, action_one_hot), axis = 1)
-actor_loss = -tf.reduce_sum(tf.log(p_i + eps) * advantage_holder)
+#logits_response = tf.reduce_sum(output_p_logits * action_one_hot, axis=1)
+#actor_loss = -tf.reduce_sum(logits_response * advantage_holder)
+neglogpac = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=action_holder)
+#pg_loss = tf.reduce_mean(ADV * neglogpac)
+actor_loss = tf.reduce_mean(advantage_holder * neglogpac)
 
  # Value/Q function loss, and explained variance
-critic_loss = 0.5 * tf.reduce_sum(tf.squared_difference(output_v, target_v_holder), 1)
+critic_loss = 0.5 * tf.reduce_mean(tf.square(tf.squeeze(output_v) - target_v_holder)/2.0)
 
 
-loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy
+loss = actor_loss + 0.5 * critic_loss - 0.01 * entory_loss
 
 '''
 #loss = tf.nn.softmax_cross_entropy_with_logits(logits=output, labels=action_one_hot)
@@ -225,13 +227,45 @@ optimizer2 = tf.train.AdamOptimizer(learning_rate=1e-4)
 update_critic = optimizer2.minimize(value_loss)
 '''
 
-optimizer = tf.train.AdamOptimizer(learning_rate=2e-4)
-update = optimizer.minimize(loss)
+#optimizer = tf.train.AdamOptimizer(learning_rate=2e-4)
+#update = optimizer.minimize(loss)
+def discount_advantage(r, v):
+    advantage = np.zeros_like(r)
+    
+    for t in range(0, r.size):
+        advantage[t] = r[t] + gamma * v[t+1] - v[t]
+        
+    return advantage
+
+def discount_rewards(r):
+    """ take 1D float array of rewards and compute discounted reward """
+    discounted_r = np.zeros_like(r)
+    running_add = 0
+    for t in reversed(range(0, r.size)):
+        running_add = running_add * gamma + r[t]
+        discounted_r[t] = running_add
+        
+    #baseline = np.mean(discounted_r)
+    #discounted_r = discounted_r - baseline
+    return discounted_r         
+
+def find_trainable_variables(key):
+    with tf.variable_scope(key):
+        return tf.trainable_variables()
+
+params = find_trainable_variables("model")
+grads = tf.gradients(loss, params)
+grads, grad_norm = tf.clip_by_global_norm(grads, 0.5)
+grads = list(zip(grads, params))
+trainer = tf.train.AdamOptimizer(learning_rate=2e-4)
+update = trainer.apply_gradients(grads)
 
 sess = tf.Session()
 sess.run(tf.global_variables_initializer())
 
-total_episodes = 2000
+total_episodes = 600
+
+f = open("c:/result.txt", 'a')
 
 rList = []
 i = 0
@@ -247,14 +281,15 @@ while i < total_episodes:
         #env.render()
         
         #if np.random.randn(1) > e:
+        
         policy, value = sess.run([output_p, output_v], feed_dict={state_holder: [s0]})
         a0 = np.random.choice(range(0, a_size), p=policy[0])
         #else:
         #    a0 = np.random.randint(env.action_space.n)
-        
+
         s1, r0, done, _ = env.step(action_index[a0])
         
-        ep_history.append([s0, a0, r0, s1, done, value[0]])
+        ep_history.append([s0, a0, r0, s1, done, value[0,0]])
              
         t_r += r0
         step += 1
@@ -263,45 +298,32 @@ while i < total_episodes:
             if done:
                 value = 0.0
             else:
-                value = sess.run(output_v, feed_dict={state_holder: [s1]})
+                value = sess.run(output_v, feed_dict={state_holder: [s1]})[0,0]
             
             ep_history_np = np.array(ep_history)
-            rewards_plus = np.array(ep_history_np[:, 2].tolist() + [value])
-            values_plus = np.array(ep_history_np[:, 5].tolist() + [value])
+            rewards = ep_history_np[:, 2]
+            values = ep_history_np[:, 5]
+            rewards_plus = np.array(rewards.tolist() + [value])
+            values_plus = np.array(values.tolist() + [value])
             
-            def discount_rewards(r):
-                """ take 1D float array of rewards and compute discounted reward """
-                discounted_r = np.zeros_like(r)
-                running_add = 0
-                for t in reversed(range(0, r.size)):
-                    running_add = running_add * gamma + r[t]
-                    discounted_r[t] = running_add
-                    
-                #baseline = np.mean(discounted_r)
-                #discounted_r = discounted_r - baseline
-                return discounted_r           
-
             dicounted_rewards = discount_rewards(rewards_plus)[:-1]
-
-            def discount_advantage(r, v):
-                advantage = np.zeros_like(r)
-                
-                for t in range(0, r.size):
-                    advantage[t] = r[t] + gamma * v[t+1] - v[t]
-                    
-                return advantage
-
-            advantage = discount_advantage(ep_history_np[:, 2], values_plus)
             
-            sess.run(update, feed_dict={
+            #print(rewards, dicounted_rewards, values)
+            advantage = discount_advantage(rewards, values_plus)
+            #print(rewards, values_plus, advantage)
+            _, e_l, a_l, c_l = sess.run(
+                    [update, entory_loss, actor_loss, critic_loss],
+                    feed_dict={
                     state_holder: np.stack(ep_history_np[:,0]),
                     target_v_holder : dicounted_rewards,
                     advantage_holder: advantage,
                     action_holder: ep_history_np[:, 1]
                     })
             #print(p_i_output)
-            ep_history.clear()
-            
+            #print(o_v, dicounted_rewards, s_e)
+            print(e_l, a_l, c_l)
+            f.write(str(e_l) + " " + str(a_l) + " " + str(c_l))
+            ep_history.clear()            
      
             if done:
                 break
@@ -312,8 +334,10 @@ while i < total_episodes:
     
     #if i % 100 == 0:
     print("game : " + str(i) + ", reward : " + str(t_r) + ", step : " + str(step))
+    f.write("game : " + str(i) + ", reward : " + str(t_r) + ", step : " + str(step))
     
 env.close()
 sess.close()
+f.close()
 
 #%%
